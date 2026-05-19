@@ -35,7 +35,24 @@ The alarm is **latched** and remains active until a valid code is entered.
 
 ### Block Diagram
 
-![Block Diagram](docs/diagram_block.png)
+
+```mermaid
+flowchart LR
+    TFT["TFT Display (ST7735)"]
+    KP["TP229 Keypad"]
+    ARD["Arduino Micro"]
+    SENS["Sensors LS1–LS4"]
+    SIR["Siren"]
+    LED["Alarm LED"]
+
+    KP --> ARD
+    SENS --> ARD
+    ARD --> TFT
+    ARD --> SIR
+    ARD --> LED
+```
+
+
 
 **Description:**
 - Arduino Micro is the central controller  
@@ -50,7 +67,38 @@ The alarm is **latched** and remains active until a valid code is entered.
 
 ### Wiring Diagram
 
-![Wiring Diagram](docs/diagram_wiring.png)
+```mermaid
+flowchart TB
+
+    subgraph INPUTS
+        KP["Keypad (SCL=2, SDA=3)"]
+        S1["LS1 (Pin 5)"]
+        S2["LS2 (Pin 4)"]
+        S3["LS3 (Pin 11)"]
+        S4["LS4 (Pin 10)"]
+    end
+
+    subgraph CONTROLLER
+        ARD["Arduino Micro"]
+    end
+
+    subgraph OUTPUTS
+        TFT["TFT (CS=6, DC=7, RST=8, MOSI=16, SCK=15)"]
+        SIR["Siren (Pin 9)"]
+        LED["LED (Pin 12)"]
+    end
+
+    KP --> ARD
+    S1 --> ARD
+    S2 --> ARD
+    S3 --> ARD
+    S4 --> ARD
+
+    ARD --> TFT
+    ARD --> SIR
+    ARD --> LED
+```
+
 
 ### Pin Mapping
 
@@ -99,28 +147,61 @@ The alarm is **latched** and remains active until a valid code is entered.
 
 ## 5. Signal Flow
 
-![Signal Flow](docs/diagram_signal_flow.png)
+```mermaid
 
-### Description
+flowchart TD
 
-``
+    A["Sensor Trigger"] --> B["Arduino Detection"]
+    B --> C["Alarm Latched"]
+
+    C --> D["Siren ON"]
+    C --> E["LED ON"]
+    C --> F["Display RED Blink"]
+
+    F --> G["Wait for Code"]
+
+    G --> H{"Valid Code?"}
+
+    H -->|Yes| I["Stop Alarm + Disarm"]
+    H -->|No| G
+```
+
+
+
+
 ---
 
 ## 6. State Machine
 
-![State Machine](docs/diagram_state_machine.png)
+```mermaid
+stateDiagram-v2
+    [*] --> Init
+    Init --> Disarmed
 
-### Flow
+    Disarmed --> Armed : Code OK
+    Armed --> Disarmed : Code OK
+
+    Armed --> Alarm : Sensor Trigger
+
+    Alarm --> Disarmed : Code OK (Acknowledge)
+```
+
+
 
 ---
 
 ## 7. EEPROM Data
 
-| Address | Data |
-|--------|-----|
-| 0 | Magic byte |
-| 1–4 | User Code |
-| 5 | Alarm state |
+
+
+```mermaid
+classDiagram
+    class EEPROM {
+        +0 : Magic Byte
+        +1-4 : User Code (4 digits)
+        +5 : Alarm State (0/1)
+    }
+```
 
 ---
 
