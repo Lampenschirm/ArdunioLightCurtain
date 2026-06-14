@@ -1,4 +1,3 @@
-
 #include <SPI.h>
 #include <EEPROM.h>
 #include <Adafruit_GFX.h>
@@ -212,7 +211,7 @@ void captureAlarmSources(bool ls1, bool ls2, bool ls3, bool ls4) {
 
 // ------------------ Display helpers ------------------
 void drawHomeHint() {
-  // oben rechts, kollidiert nicht mit showMsg()
+  // oben rechts, damit showMsg unten frei bleibt
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
   tft.setCursor(78, 0);
@@ -244,6 +243,49 @@ void drawSensorStatusLine(int y, const char* label, bool active) {
   }
 }
 
+void drawSkull(int x, int y) {
+  // Puls-Animation
+  int r = blinkState ? 16 : 13;
+  int yOffset = blinkState ? 0 : 2;
+
+  // Knochen-Bewegung
+  int boneOffset = blinkState ? 4 : 1;
+
+  // ===== Kopf =====
+  tft.drawCircle(x, y + yOffset, r, ST77XX_WHITE);
+
+  // Unterkiefer
+  tft.drawRoundRect(x - r + 3, y + 6 + yOffset, (r - 3) * 2, 10, 5, ST77XX_WHITE);
+
+  // ===== Augen =====
+  tft.drawCircle(x - 6, y - 3 + yOffset, 4, ST77XX_WHITE);
+  tft.drawCircle(x + 6, y - 3 + yOffset, 4, ST77XX_WHITE);
+
+  // ===== Nase =====
+  tft.fillTriangle(
+    x, y + 1 + yOffset,
+    x - 3, y + 6 + yOffset,
+    x + 3, y + 6 + yOffset,
+    ST77XX_WHITE
+  );
+
+  // ===== Mund =====
+  tft.drawLine(x - 7, y + 10 + yOffset, x + 7, y + 10 + yOffset, ST77XX_WHITE);
+
+  // ===== Zähne =====
+  tft.drawLine(x - 3, y + 10 + yOffset, x - 3, y + 14 + yOffset, ST77XX_WHITE);
+  tft.drawLine(x + 3, y + 10 + yOffset, x + 3, y + 14 + yOffset, ST77XX_WHITE);
+
+  // ===== Animierte Knochen =====
+  // LINKS
+  tft.drawCircle(x - r - boneOffset, y - 4 + yOffset, 3, ST77XX_WHITE);
+  tft.drawCircle(x - r - boneOffset, y + 4 + yOffset, 3, ST77XX_WHITE);
+
+  // RECHTS
+  tft.drawCircle(x + r + boneOffset, y - 4 + yOffset, 3, ST77XX_WHITE);
+  tft.drawCircle(x + r + boneOffset, y + 4 + yOffset, 3, ST77XX_WHITE);
+}
+
 void drawStarsLine() {
   uint16_t bg = ST77XX_BLACK;
 
@@ -252,7 +294,7 @@ void drawStarsLine() {
     bg = ST77XX_RED;
   }
 
-  int y = (uiState == UI_ALARM) ? 78 : 55;
+  int y = (uiState == UI_ALARM) ? 114 : 55;
 
   tft.fillRect(8, y, 112, 14, bg);
   tft.setCursor(8, y);
@@ -412,17 +454,20 @@ void drawDiagScreen() {
 void drawAlarmCodeScreenBase() {
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(18, 10);
+  tft.setCursor(28, 8);
   tft.print("ALARM");
+
+  // Pulsierender Totenkopf mit animierten Knochen
+  drawSkull(64, 36);
 
   // Ausloeser anzeigen
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(8, 34);
+  tft.setCursor(8, 62);
   tft.print("Ausloeser:");
 
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(8, 46);
+  tft.setCursor(8, 74);
 
   if (alarmSourceMask == 0) {
     tft.print("Unbekannt");
@@ -450,17 +495,12 @@ void drawAlarmCodeScreenBase() {
   }
 
   tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(8, 68);
+  tft.setCursor(8, 96);
   tft.print("Code zum Stoppen:");
 
   drawStarsLine();
 
-  tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(8, 90);
-  tft.print("#=OK   *=Clear");
-
-  // Absichtlich KEIN drawHomeHint() hier:
-  // B darf im Alarmfall nicht zum Hauptscreen springen.
+  // Im Alarmmodus absichtlich kein B=Home-Hinweis.
 }
 
 
@@ -735,7 +775,7 @@ void handleKey(char k) {
     }
     else if (uiState == UI_RESET_CONFIRM) drawResetConfirmScreen();
     else if (uiState == UI_ALARM) {
-      // Alarm-Screen neu zeichnen (ohne Flackern warten)
+      // Alarm-Screen neu zeichnen
       tft.fillScreen(blinkState ? ST77XX_RED : ST77XX_BLACK);
       drawAlarmCodeScreenBase();
     }
