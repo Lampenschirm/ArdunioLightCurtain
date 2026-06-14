@@ -1,3 +1,4 @@
+
 #include <SPI.h>
 #include <EEPROM.h>
 #include <Adafruit_GFX.h>
@@ -36,8 +37,13 @@ const int EEPROM_CODE_ADDR    = 1; // 4 Bytes: Code[0..3]
 const int EEPROM_ALARM_ADDR   = 5; // 1 Byte: Alarm scharf? (0/1)
 const uint8_t EEPROM_MAGIC    = 0xA7;
 
+// ================== Einheitliche Sensorlogik ==================
+// true  -> Sensor ist aktiv bei LOW  (typisch mit INPUT_PULLUP)
+// false -> Sensor ist aktiv bei HIGH
+const bool SENSOR_ACTIVE_LOW = false;
+
 // ================== Sirene ==================
-// Für PKM22EPP-40 besser im Bereich ca. 3 kHz - 4.5 kHz
+// Für PKM22EPP-40 gut hörbar im Bereich ca. 3.2 kHz - 4.3 kHz
 int sirenenFreq = 3500;
 bool sireneAufwaerts = true;
 
@@ -46,6 +52,9 @@ bool alarmLatched = false;          // bleibt TRUE bis quittiert
 bool blinkState = false;
 unsigned long lastBlinkMs = 0;
 const unsigned long BLINK_INTERVAL_MS = 250;  // Flackertakt
+
+// Welche Lichtschranke hat ausgelöst? Bit0=LS1, Bit1=LS2, Bit2=LS3, Bit3=LS4
+uint8_t alarmSourceMask = 0;
 
 // ================== Einschaltverzögerung ==================
 bool armingPending = false;                    // wartet auf Scharfschaltung
@@ -62,10 +71,23 @@ const int COUNTDOWN_BEEP_FREQ = 4000;         // gut für PKM22EPP-40
 const unsigned long COUNTDOWN_BEEP_MS = 80;   // kurzer Piepton
 
 // ================== UI / State ==================
-enum UiState { UI_SET1, UI_SET2, UI_CODE, UI_STATUS, UI_RESET_CONFIRM, UI_ALARM };
+enum UiState {
+  UI_SET1,
+  UI_SET2,
+  UI_CODE,
+  UI_STATUS,
+  UI_DIAG,
+  UI_RESET_CONFIRM,
+  UI_ALARM
+};
 UiState uiState = UI_CODE;
 
-enum CodeAction { ACT_TOGGLE_ALARM, ACT_CHANGE_CODE, ACT_FACTORY_RESET, ACT_ACK_ALARM };
+enum CodeAction {
+  ACT_TOGGLE_ALARM,
+  ACT_CHANGE_CODE,
+  ACT_FACTORY_RESET,
+  ACT_ACK_ALARM
+};
 CodeAction codeAction = ACT_TOGGLE_ALARM;
 
 bool alarmArmed  = false;  // Alarm scharf?
@@ -81,21 +103,28 @@ uint8_t lastKeyRaw = 0;
 // Flags für Set-Code-Flows
 bool initialSetupFlow = false;
 
+
 // ------------------ Helpers ------------------
-bool isDigit(char c) { return (c >= '0' && c <= '9'); }
+bool isDigit(char c) {
+  return (c >= '0' && c <= '9');
+}
 
 bool eepromHasCode() {
   return EEPROM.read(EEPROM_MAGIC_ADDR) == EEPROM_MAGIC;
 }
 
 void eepromReadCode(char outCode[5]) {
-  for (int i = 0; i < 4; i++) outCode[i] = (char)EEPROM.read(EEPROM_CODE_ADDR + i);
+  for (int i = 0; i < 4; i++) {
+    outCode[i] = (char)EEPROM.read(EEPROM_CODE_ADDR + i);
+  }
   outCode[4] = '\0';
 }
 
 void eepromWriteCode(const char inCode[5]) {
   EEPROM.update(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
-  for (int i = 0; i < 4; i++) EEPROM.update(EEPROM_CODE_ADDR + i, (uint8_t)inCode[i]);
+  for (int i = 0; i < 4; i++) {
+    EEPROM.update(EEPROM_CODE_ADDR + i, (uint8_t)inCode[i]);
+  }
 }
 
 void eepromWriteAlarm(bool armed) {
@@ -112,7 +141,9 @@ void resetCodeEntry() {
 }
 
 void takeCodeInto(char target[5]) {
-  for (int i = 0; i < 4; i++) target[i] = codeBuf[i];
+  for (int i = 0; i < 4; i++) {
+    target[i] = codeBuf[i];
+  }
   target[4] = '\0';
 }
 
@@ -130,6 +161,12 @@ bool checkAgainstStoredCode() {
     if (codeBuf[i] != stored[i]) return false;
   }
   return true;
+}
+
+// Einheitliche Sensorauswertung
+bool sensorTriggered(uint8_t pin) {
+  int v = digitalRead(pin);
+  return SENSOR_ACTIVE_LOW ? (v == LOW) : (v == HIGH);
 }
 
 // Countdown: verbleibende Sekunden (30 ... 1 ... 0)
@@ -163,13 +200,48 @@ void updateCountdownBeep() {
   }
 }
 
+void captureAlarmSources(bool ls1, bool ls2, bool ls3, bool ls4) {
+  alarmSourceMask = 0;
+
+  if (ls1) alarmSourceMask |= 0x01;
+  if (ls2) alarmSourceMask |= 0x02;
+  if (ls3) alarmSourceMask |= 0x04;
+  if (ls4) alarmSourceMask |= 0x08;
+}
+
+
 // ------------------ Display helpers ------------------
+void drawHomeHint() {
+  // oben rechts, kollidiert nicht mit showMsg()
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(78, 0);
+  tft.print("B=Home");
+}
+
 void drawHeader(const char* title) {
   tft.fillScreen(ST77XX_BLACK);
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
   tft.setCursor(8, 8);
   tft.print(title);
+}
+
+void drawSensorStatusLine(int y, const char* label, bool active) {
+  tft.setTextSize(1);
+
+  tft.setCursor(8, y);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.print(label);
+  tft.print(": ");
+
+  if (active) {
+    tft.setTextColor(ST77XX_RED);
+    tft.print("BLOCK");
+  } else {
+    tft.setTextColor(ST77XX_GREEN);
+    tft.print("OK");
+  }
 }
 
 void drawStarsLine() {
@@ -180,8 +252,10 @@ void drawStarsLine() {
     bg = ST77XX_RED;
   }
 
-  tft.fillRect(8, 55, 112, 14, bg);
-  tft.setCursor(8, 55);
+  int y = (uiState == UI_ALARM) ? 78 : 55;
+
+  tft.fillRect(8, y, 112, 14, bg);
+  tft.setCursor(8, y);
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
 
@@ -208,16 +282,23 @@ void showMsg(uint16_t color, const char* msg) {
   tft.setTextColor(color);
   tft.setCursor(8, 114);
   tft.print(msg);
+
+  // Home-Hinweis auf allen normalen Screens nachzeichnen
+  if (uiState != UI_ALARM) {
+    drawHomeHint();
+  }
 }
 
 void drawSetCode1Screen() {
   drawHeader("Neuen Code setzen");
   drawCodeLine("Code (4 Ziffern):");
+  drawHomeHint();
 }
 
 void drawSetCode2Screen() {
   drawHeader("Code bestaetigen");
   drawCodeLine("Nochmal eingeben:");
+  drawHomeHint();
 }
 
 void drawEnterCodeScreen() {
@@ -239,6 +320,7 @@ void drawEnterCodeScreen() {
   }
 
   drawCodeLine("Code (4 Ziffern):");
+  drawHomeHint();
 }
 
 void drawResetConfirmScreen() {
@@ -255,20 +337,21 @@ void drawResetConfirmScreen() {
   tft.setTextColor(ST77XX_CYAN);
   tft.setCursor(8, 90);
   tft.print("#=JA   *=Abbruch");
+  drawHomeHint();
 }
 
 void drawStatusScreen() {
   tft.fillScreen(ST77XX_BLACK);
 
   tft.setTextSize(2);
-  tft.setCursor(8, 25);
+  tft.setCursor(8, 22);
 
   if (armingPending) {
     int sec = getArmingRemainingSec();
 
     tft.setTextColor(ST77XX_YELLOW);
     tft.print("SCHARF");
-    tft.setCursor(8, 47);
+    tft.setCursor(8, 44);
     tft.print("IN ");
     if (sec < 10) tft.print(" ");
     tft.print(sec);
@@ -276,37 +359,98 @@ void drawStatusScreen() {
   } else if (alarmArmed) {
     tft.setTextColor(ST77XX_RED);
     tft.print("ALARM");
-    tft.setCursor(8, 47);
+    tft.setCursor(8, 44);
     tft.print("EIN");
   } else {
     tft.setTextColor(ST77XX_GREEN);
     tft.print("ALARM");
-    tft.setCursor(8, 47);
+    tft.setCursor(8, 44);
     tft.print("AUS");
   }
 
   tft.setTextSize(1);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(8, 78);
+  tft.setCursor(8, 76);
   tft.print("# = Alarm ");
   tft.print((alarmArmed || armingPending) ? "AUS" : "EIN");
 
-  tft.setCursor(8, 90);
-  tft.print("D = Code aendern");
+  tft.setCursor(8, 88);
+  tft.print("A = Diagnose");
 
-  tft.setCursor(8, 102);
-  tft.print("C = RESET (Urzustand)");
+  tft.setCursor(8, 100);
+  tft.print("D = Code  C = Reset");
+
+  drawHomeHint();
+}
+
+void drawDiagScreen() {
+  tft.fillScreen(ST77XX_BLACK);
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_CYAN);
+  tft.setCursor(8, 8);
+  tft.print("DIAGNOSE LICHTSCHRANKEN");
+
+  bool s1 = sensorTriggered(LICHTSCHRANKE1);
+  bool s2 = sensorTriggered(LICHTSCHRANKE2);
+  bool s3 = sensorTriggered(LICHTSCHRANKE3);
+  bool s4 = sensorTriggered(LICHTSCHRANKE4);
+
+  drawSensorStatusLine(30, "LS1", s1);
+  drawSensorStatusLine(44, "LS2", s2);
+  drawSensorStatusLine(58, "LS3", s3);
+  drawSensorStatusLine(72, "LS4", s4);
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(8, 100);
+  tft.print("A/* = Zurueck");
+
+  drawHomeHint();
 }
 
 void drawAlarmCodeScreenBase() {
-  // Grundlayout für Alarm-Quittierung (Blinkfarbe wird separat gesetzt)
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(18, 12);
+  tft.setCursor(18, 10);
   tft.print("ALARM");
 
+  // Ausloeser anzeigen
   tft.setTextSize(1);
-  tft.setCursor(8, 40);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(8, 34);
+  tft.print("Ausloeser:");
+
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(8, 46);
+
+  if (alarmSourceMask == 0) {
+    tft.print("Unbekannt");
+  } else {
+    bool first = true;
+
+    if (alarmSourceMask & 0x01) {
+      tft.print("LS1");
+      first = false;
+    }
+    if (alarmSourceMask & 0x02) {
+      if (!first) tft.print(" ");
+      tft.print("LS2");
+      first = false;
+    }
+    if (alarmSourceMask & 0x04) {
+      if (!first) tft.print(" ");
+      tft.print("LS3");
+      first = false;
+    }
+    if (alarmSourceMask & 0x08) {
+      if (!first) tft.print(" ");
+      tft.print("LS4");
+    }
+  }
+
+  tft.setTextColor(ST77XX_CYAN);
+  tft.setCursor(8, 68);
   tft.print("Code zum Stoppen:");
 
   drawStarsLine();
@@ -314,7 +458,11 @@ void drawAlarmCodeScreenBase() {
   tft.setTextColor(ST77XX_CYAN);
   tft.setCursor(8, 90);
   tft.print("#=OK   *=Clear");
+
+  // Absichtlich KEIN drawHomeHint() hier:
+  // B darf im Alarmfall nicht zum Hauptscreen springen.
 }
+
 
 // ------------------ Factory Reset ------------------
 void factoryResetNow() {
@@ -324,6 +472,7 @@ void factoryResetNow() {
   lastShownArmingSec = -1;
   countdownBeepActive = false;
   lastBeepSecond = -1;
+  alarmSourceMask = 0;
 
   digitalWrite(ALARM_LED, LOW);
   noTone(SIRENE);
@@ -347,6 +496,7 @@ void acknowledgeAlarmAndDisarm() {
   lastShownArmingSec = -1;
   countdownBeepActive = false;
   lastBeepSecond = -1;
+  alarmSourceMask = 0;
 
   eepromWriteAlarm(false);
 
@@ -362,18 +512,18 @@ void acknowledgeAlarmAndDisarm() {
 void starteSirene() {
   tone(SIRENE, sirenenFreq);
 
-  // Sweep für hörbaren Sirenen-Effekt mit PKM22EPP-40
-  sirenenFreq += sireneAufwaerts ? 20 : -20;
+  // schnellerer Sweep -> wirkt aggressiver / lauter
+  sirenenFreq += sireneAufwaerts ? 60 : -60;
 
-  if (sirenenFreq >= 4500) sireneAufwaerts = false;
-  if (sirenenFreq <= 3000) sireneAufwaerts = true;
+  if (sirenenFreq >= 4300) sireneAufwaerts = false;
+  if (sirenenFreq <= 3200) sireneAufwaerts = true;
 }
 
 void updateAlarmLatch() {
-  bool ls1 = digitalRead(LICHTSCHRANKE1);
-  bool ls2 = digitalRead(LICHTSCHRANKE2);
-  bool ls3 = digitalRead(LICHTSCHRANKE3);
-  bool ls4 = digitalRead(LICHTSCHRANKE4);
+  bool ls1 = sensorTriggered(LICHTSCHRANKE1);
+  bool ls2 = sensorTriggered(LICHTSCHRANKE2);
+  bool ls3 = sensorTriggered(LICHTSCHRANKE3);
+  bool ls4 = sensorTriggered(LICHTSCHRANKE4);
 
   bool triggered = (ls1 || ls2 || ls3 || ls4);
 
@@ -381,6 +531,13 @@ void updateAlarmLatch() {
   if (alarmArmed && triggered) {
     if (!alarmLatched) {
       alarmLatched = true;
+
+      // Merken, welche Lichtschranke ausgelöst hat
+      captureAlarmSources(ls1, ls2, ls3, ls4);
+
+      // Sirene definiert starten
+      sirenenFreq = 3500;
+      sireneAufwaerts = true;
 
       // Countdown sicher beenden
       armingPending = false;
@@ -467,6 +624,7 @@ void updateArmingDelay() {
   }
 }
 
+
 // ------------------ Setup / Loop ------------------
 void setup() {
   Serial.begin(9600);
@@ -492,6 +650,7 @@ void setup() {
   lastShownArmingSec = -1;
   countdownBeepActive = false;
   lastBeepSecond = -1;
+  alarmSourceMask = 0;
 
   if (!hasCode) {
     initialSetupFlow = true;
@@ -518,7 +677,14 @@ void loop() {
   // 4) Alarm-Screen blinken (non-blocking)
   updateAlarmBlinkScreen();
 
-  // 5) Keypad lesen (edge detection)
+  // 5) Diagnose-Screen live aktualisieren
+  static unsigned long lastDiagUpdate = 0;
+  if (uiState == UI_DIAG && millis() - lastDiagUpdate >= 200) {
+    lastDiagUpdate = millis();
+    drawDiagScreen();
+  }
+
+  // 6) Keypad lesen (edge detection)
   keypad.update();
   uint8_t keyRaw = keypad.getPressedKey();
 
@@ -533,8 +699,28 @@ void loop() {
   delay(10);
 }
 
+
 // ------------------ Key Handling ------------------
 void handleKey(char k) {
+  // ===== GLOBAL HOME =====
+  if (k == 'B') {
+    // Während aktivem Alarm aus Sicherheitsgründen NICHT verlassen
+    if (uiState == UI_ALARM) {
+      return;
+    }
+
+    // Erstinbetriebnahme / nach Reset: Code-Setzen nicht umgehen
+    if ((uiState == UI_SET1 || uiState == UI_SET2) && initialSetupFlow) {
+      showMsg(ST77XX_YELLOW, "Code zuerst setzen");
+      return;
+    }
+
+    resetCodeEntry();
+    uiState = UI_STATUS;
+    drawStatusScreen();
+    return;
+  }
+
   // Clear / Abbruch
   if (k == '*') {
     resetCodeEntry();
@@ -543,6 +729,10 @@ void handleKey(char k) {
     else if (uiState == UI_SET2) drawSetCode2Screen();
     else if (uiState == UI_CODE) drawEnterCodeScreen();
     else if (uiState == UI_STATUS) drawStatusScreen();
+    else if (uiState == UI_DIAG) {
+      uiState = UI_STATUS;
+      drawStatusScreen();
+    }
     else if (uiState == UI_RESET_CONFIRM) drawResetConfirmScreen();
     else if (uiState == UI_ALARM) {
       // Alarm-Screen neu zeichnen (ohne Flackern warten)
@@ -560,7 +750,7 @@ void handleKey(char k) {
     return;
   }
 
-  // STATUS: Shortcuts (nur wenn nicht im Alarm)
+  // STATUS: Shortcuts
   if (uiState == UI_STATUS) {
     if (k == '#') {                 // Alarm togglen -> Code erforderlich
       codeAction = ACT_TOGGLE_ALARM;
@@ -582,6 +772,20 @@ void handleKey(char k) {
       resetCodeEntry();
       drawEnterCodeScreen();
       return;
+    }
+    if (k == 'A') {                 // Diagnose-Modus
+      uiState = UI_DIAG;
+      drawDiagScreen();
+      return;
+    }
+    return;
+  }
+
+  // Diagnose-Modus
+  if (uiState == UI_DIAG) {
+    if (k == 'A' || k == '*') {
+      uiState = UI_STATUS;
+      drawStatusScreen();
     }
     return;
   }
@@ -634,6 +838,7 @@ void handleKey(char k) {
         lastShownArmingSec = -1;
         countdownBeepActive = false;
         lastBeepSecond = -1;
+        alarmSourceMask = 0;
         eepromWriteAlarm(false);
         initialSetupFlow = false;
       } else {
@@ -672,6 +877,7 @@ void handleKey(char k) {
           lastShownArmingSec = -1;
           countdownBeepActive = false;
           lastBeepSecond = -1;
+          alarmSourceMask = 0;
 
           eepromWriteAlarm(false);
 
@@ -690,6 +896,7 @@ void handleKey(char k) {
         lastShownArmingSec = -1; // Countdown-Refresh erzwingen
         countdownBeepActive = false;
         lastBeepSecond = -1;
+        alarmSourceMask = 0;
         alarmArmed = false;
 
         eepromWriteAlarm(false);
